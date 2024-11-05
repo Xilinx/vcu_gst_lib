@@ -1,6 +1,6 @@
 /*********************************************************************
  * Copyright (C) 2017-2022 Xilinx, Inc.
- * Copyright (C) 2022-2023 Advanced Micro Devices, Inc.
+ * Copyright (C) 2022-2024 Advanced Micro Devices, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -49,6 +49,8 @@ VGST_ERROR_LOG link_audio_pipeline (vgst_ip_params *ip_param, vgst_playback *pla
 
 /* This API is to get the proper coordinates for multi-stream */
 void get_coordinates (guint *x, guint *y, guint cnt, guint num_src);
+/* This API is to link element pads */
+void on_pad_added_dec (GstElement *element, GstPad *pad, gpointer data);
 
 #ifdef __cplusplus
 }

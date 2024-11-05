@@ -1,6 +1,6 @@
 /*********************************************************************
  * Copyright (C) 2017-2022 Xilinx, Inc.
- * Copyright (C) 2022-2023 Advanced Micro Devices, Inc.
+ * Copyright (C) 2022-2024 Advanced Micro Devices, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -30,6 +30,28 @@ VGST_ERROR_LOG
 create_pipeline (vgst_ip_params *ip_param, vgst_enc_params *enc_param, vgst_playback *play_ptr, guint sink_type, gchar *uri, vgst_aud_params *aud_param) {
     gint llp2_design = vlib_is_llp2_design();
     play_ptr->pipeline        = gst_pipeline_new ("vcu-trd");
+    if (ip_param->src_type == FILE_SRC && sink_type == DISPLAY)   
+	{
+	if (ip_param->format == YU24 || ip_param->format == X403)
+	{
+	play_ptr->ip_src      = gst_element_factory_make ("filesrc",   NULL);
+	play_ptr->demux       = gst_element_factory_make ("tsdemux",   NULL);
+	play_ptr->queue       = gst_element_factory_make ("queue",           NULL);
+	play_ptr->videoparser = gst_element_factory_make (H265_PARSER_NAME, NULL);
+	play_ptr->videodec    = gst_element_factory_make (H265_DEC_NAME,    NULL);
+	play_ptr->videosink   = gst_element_factory_make ("kmssink",       NULL);
+
+	if (!play_ptr->pipeline || !play_ptr->ip_src || !play_ptr->demux || !play_ptr->queue || !play_ptr->videoparser || !play_ptr->videodec || !play_ptr->videosink) {
+		GST_ERROR ("FAILED to create common element");
+		return VGST_ERROR_PIPELINE_CREATE_FAIL;
+	} else {
+		GST_DEBUG ("All common elements are created");
+		}
+	gst_bin_add_many (GST_BIN(play_ptr->pipeline), play_ptr->ip_src, play_ptr->demux, play_ptr->queue, play_ptr->videoparser,
+                      play_ptr->videodec, play_ptr->videosink, NULL);
+    return VGST_SUCCESS;
+    }
+ }
     if (ip_param->src_type == FILE_SRC || STREAMING_SRC == ip_param->src_type)
       play_ptr->ip_src          = gst_element_factory_make (FILE_SRC_NAME,   NULL);
     else if (ip_param->src_type == LIVE_SRC)
@@ -252,7 +274,21 @@ set_property (vgst_application *app, gint index) {
     vgst_cmn_params *cmn_param = app->cmn_params;
     vgst_op_params *op_param = &app->op_params[index];
     vgst_aud_params *aud_param =  &app->aud_params[index];
-
+	if (ip_param->format == YU24 || ip_param->format == X403)
+	{
+    	if(ip_param->src_type == FILE_SRC)
+    	{
+     	//filesrc location setting
+    	g_object_set (G_OBJECT (play_ptr->ip_src), "location",    "/run/test.ts", NULL);
+    	// video sink property settings
+    	g_object_set (G_OBJECT (play_ptr->videosink), "bus-id", cmn_param->bus_id, NULL);
+    	g_object_set (G_OBJECT (play_ptr->videosink), "show-preroll-frame", FALSE, NULL);
+    	g_object_set (G_OBJECT (play_ptr->videosink), "gray-to-y444", TRUE, NULL);
+    	// video dec property settings
+    	g_object_set (G_OBJECT (play_ptr->videodec), "disable-realtime", TRUE, NULL);
+    	goto END;
+    	}
+    } 
     gint llp2_design = vlib_is_llp2_design();
     guint dec_buffer_cnt = ceil((float)DEFAULT_DEC_BUFFER_CNT/cmn_param->num_src);
     dec_buffer_cnt = dec_buffer_cnt < MIN_DEC_BUFFER_CNT ? MIN_DEC_BUFFER_CNT : dec_buffer_cnt;
@@ -531,6 +567,8 @@ set_property (vgst_application *app, gint index) {
     if (ip_param->enable_scd && (SCD_MEMORY == ip_param->scd_type) && play_ptr->xilinxscd) {
       g_object_set (G_OBJECT (play_ptr->xilinxscd), "io-mode", VGST_V4L2_IO_MODE_DMABUF_IMPORT, NULL);
     }
+END:
+    ;
 }
 
 
@@ -817,9 +855,71 @@ CLEAN_UP :
     return ret;
 }
 
+void
+on_pad_added_dec (GstElement *element,
+              GstPad     *pad,
+              gpointer   data) {
+    gchar *str;
+    guint i, index =0;
+    vgst_playback *play_ptr = (vgst_playback *)data;
+    GstCaps *caps = gst_pad_get_current_caps (pad);
+    GstStructure *structure;
+    gint width, height;
+    const gchar *new_pad_type = NULL;
+    GstStateChangeReturn ret;
+    str = gst_caps_to_string(caps);
+    GstPad *queue_sink_pad = gst_element_get_static_pad (play_ptr->queue, "sink");
+    GstPad *queue_src_pad = gst_element_get_static_pad (play_ptr->queue, "src");
+    GstPad *parser_sink_pad = gst_element_get_static_pad (play_ptr->videoparser, "sink");
+    GstPad *parser_src_pad = gst_element_get_static_pad (play_ptr->videoparser, "src");
+    GstPad *dec_sink_pad = gst_element_get_static_pad (play_ptr->videodec, "sink");
+    GstPad *dec_src_pad = gst_element_get_static_pad (play_ptr->videodec, "src");
+    GstPad *vid_sink_pad = gst_element_get_static_pad (play_ptr->videosink, "sink");
+ 
+    if (gst_pad_is_linked (queue_sink_pad)) {
+      g_print ("We are already linked. Ignoring.\n");
+      goto exit;
+    }
+ 
+    if (g_str_has_prefix (str, "video/")) {
+ 
+      structure = gst_caps_get_structure(caps, 0);
+      new_pad_type = gst_structure_get_name (structure);
+       ret = gst_pad_link (pad, queue_sink_pad);
+       ret = gst_pad_link (queue_src_pad, parser_sink_pad);
+       ret = gst_pad_link (parser_src_pad, dec_sink_pad);
+       ret = gst_pad_link (dec_src_pad, vid_sink_pad);
+        if (GST_PAD_LINK_FAILED (ret)) {
+          g_print ("Type is '%s' but link failed.\n", new_pad_type);
+        } else {
+          g_print ("Link succeeded (type '%s').\n", new_pad_type);
+        }
+    }
+ 
+exit:
+    g_free (str);
+    gst_caps_unref (caps);
+
+    gst_object_unref(queue_sink_pad);
+    gst_object_unref(queue_src_pad);
+    gst_object_unref(parser_sink_pad);
+    gst_object_unref(parser_src_pad);
+    gst_object_unref(dec_sink_pad);
+    gst_object_unref(dec_src_pad);
+    gst_object_unref(vid_sink_pad);
+}
 
 VGST_ERROR_LOG
 link_elements (vgst_ip_params *ip_param, vgst_playback *play_ptr, gint sink_type, vgst_aud_params *aud_param, gchar *uri, vgst_enc_params *enc_param) {
+	if(ip_param->src_type == FILE_SRC && sink_type == DISPLAY)
+    	{
+    	if (ip_param->format == YU24 || ip_param->format == X403)
+    	{
+     	gst_element_link_many (play_ptr->ip_src, play_ptr->demux, play_ptr->queue, play_ptr->videoparser, play_ptr->videodec, play_ptr->videosink, NULL);
+        g_signal_connect (play_ptr->demux, "pad-added", G_CALLBACK (on_pad_added_dec), play_ptr);
+   	return VGST_SUCCESS;
+   	}
+   	}
     if (FILE_SRC == ip_param->src_type || STREAMING_SRC == ip_param->src_type) {
       g_object_set (G_OBJECT(play_ptr->ip_src), "uri", ip_param->uri, NULL);
       g_signal_connect (play_ptr->ip_src, "pad-added", G_CALLBACK (on_pad_added), play_ptr);
